@@ -7,7 +7,7 @@
 #include "Eigen-3.3/Eigen/QR"
 #include "helpers.h"
 #include "json.hpp"
-
+#include "spline.h"
 // for convenience
 using nlohmann::json;
 using std::string;
@@ -49,9 +49,14 @@ int main() {
     map_waypoints_dx.push_back(d_x);
     map_waypoints_dy.push_back(d_y);
   }
+  
+  int lane = 1;
+  
+  double ref_vel = 0.0;
+  
 
   h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,
-               &map_waypoints_dx,&map_waypoints_dy]
+               &map_waypoints_dx,&map_waypoints_dy,&lane,&ref_vel]
               (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -88,17 +93,206 @@ int main() {
           //   of the road.
           auto sensor_fusion = j[1]["sensor_fusion"];
 
+          
+          
+          int prev_size = previous_path_x.size();
+          
+          if(prev_size > 0){
+            car_s = end_path_s;
+          }
+          
+          bool too_close = false;
+          int target_car_lane = 0;
+          bool car_front = false;
+          bool car_left = false;
+          bool car_right = false;
+          
+          for(int i = 0; i< sensor_fusion.size();i++){
+            
+            float d = sensor_fusion[i][6];
+            
+//checking car lane
+                if (d > 0 && d< 4) {
+                    target_car_lane = 0;
+                }
+                else if (d > 4 && d<8){
+                    target_car_lane = 1;
+                }
+                else if (d > 8 && d < 12) {
+                    target_car_lane = 2;
+                }
+                else {
+                    target_car_lane = -1;
+                }
+                         
+
+              double vx = sensor_fusion[i][3];
+              double vy = sensor_fusion[i][4];
+              double check_speed = sqrt(vx*vx+vy*vy);
+              double check_car_s = sensor_fusion[i][5];
+//Decision making state machine
+            
+              check_car_s += ((double)prev_size*0.02*check_speed);
+             // printf("===target_car_lane = %d lane = %d===  \n ",target_car_lane,lane);
+              if((target_car_lane == lane) && (check_car_s > car_s) && ((check_car_s-car_s)<30) ){
+                car_front = true;
+                //printf("target_car_lane = %d\n",target_car_lane);
+              //  printf("=================car_front==============================\n");
+                
+              }else if ( (target_car_lane == (lane -1)) && (car_s -30 <check_car_s && car_s+30 > check_car_s) ){
+               car_left = true;
+               // printf("target_car_lane = %d\n",target_car_lane);
+               // printf("car_left\n");
+                
+              }else if( (target_car_lane == (lane +1)) && (car_s -30 <check_car_s && car_s+30 > check_car_s)){
+               car_right = true;
+                //printf("target_car_lane = %d\n",target_car_lane);
+              //  printf("car_right\n");
+              }
+            
+          }
+          if (car_front) {
+            
+           //printf("car_front action\n");
+                ref_vel -= 0.224;
+
+                /* And if there is no car in the left side of the lane */
+                if (lane > 0 && !car_left) {
+                //  printf("left_lane go\n");
+                    lane--;
+                }
+                /* And if there is no car in the right side of the lane */
+                else if (lane < 2 && !car_right) {
+                //  printf("right lane go \n");
+                    lane++;
+                }
+            }
+            else {
+                if (ref_vel < 49.50) {
+                    ref_vel += 0.224;
+                }
+            } 
+     
+          std::vector<double> points_x{};
+          std::vector<double> points_y{};
+
+          
+          double ref_x = car_x;
+          double ref_y = car_y;
+          double ref_yaw = deg2rad(car_yaw);
+
+// if less 2 prev points earlier make points tangent to current direction.
+          if (prev_size < 2) {
+              double previous_car_x = car_x - cos(car_yaw);
+              double previous_car_y = car_y - sin(car_yaw);
+
+              
+              points_x.push_back(previous_car_x);
+              points_x.push_back(car_x);
+
+              points_y.push_back(previous_car_y);
+              points_y.push_back(car_y);
+              
+          }
+// else take previous values.
+          else {
+              ref_x = previous_path_x[prev_size - 1];
+              ref_y = previous_path_y[prev_size - 1];
+
+              double ref_x_prev = previous_path_x[prev_size - 2];
+              double ref_y_prev = previous_path_y[prev_size - 2];
+             
+              ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
+
+              points_x.push_back(ref_x_prev);
+              points_x.push_back(ref_x);
+
+              points_y.push_back(ref_y_prev);
+              points_y.push_back(ref_y);
+          }
+
+ 
+          std::vector<double> next_wp0 = getXY(car_s + 30, (2 + 4 * lane), map_waypoints_s,
+              map_waypoints_x, map_waypoints_y);
+          std::vector<double> next_wp1 = getXY(car_s + 60, (2 + 4 * lane), map_waypoints_s,
+              map_waypoints_x, map_waypoints_y);
+          std::vector<double> next_wp2 = getXY(car_s + 90, (2 + 4 * lane), map_waypoints_s,
+              map_waypoints_x, map_waypoints_y);
+
+          points_x.push_back(next_wp0[0]);
+          points_x.push_back(next_wp1[0]);
+          points_x.push_back(next_wp2[0]);
+
+          points_y.push_back(next_wp0[1]);
+          points_y.push_back(next_wp1[1]);
+          points_y.push_back(next_wp2[1]);
+
+          for (int i = 0; i < points_x.size(); i++) {
+              
+              double shift_x = points_x[i] - ref_x;
+              double shift_y = points_y[i] - ref_y;
+
+// local transformation             
+              points_x[i] = (shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw));
+              points_y[i] = (shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw));
+          }
+
+// spline object;
+          tk::spline s;
+
+        
+          s.set_points(points_x, points_y);
+
+          std::vector<double> next_x_vals;
+          std::vector<double> next_y_vals;
+
+          
+          for (int i = 0; i < previous_path_x.size(); i++) {
+              next_x_vals.push_back(previous_path_x[i]);
+              next_y_vals.push_back(previous_path_y[i]);
+          }
+
+        
+
+         
+          double target_x = 30;
+          
+          double target_y = s(target_x);
+         
+          double target_dist = sqrt((target_x * target_x) + (target_y * target_y));
+          double x_add_on = 0;
+
+// use previous unused point and add new poitns equal to traversed by car. 
+          for (int i = 1; i <= (50 - previous_path_x.size()); i++) {
+              
+              double target_dist_points = (0.02 * ref_vel / 2.24);
+             
+              double N = (target_dist / target_dist_points);
+              
+              double dist_target_x_points = (target_x) / N;
+              
+              double x_point = x_add_on + dist_target_x_points;
+              double y_point = s(x_point);
+
+            
+              x_add_on = x_point;
+
+          
+              double x_temp = x_point;
+              double y_temp = y_point;
+
+    
+              x_point = (x_temp * cos(ref_yaw) - y_temp * sin(ref_yaw));
+              y_point = (x_temp * sin(ref_yaw) + y_temp * cos(ref_yaw));
+
+              x_point += ref_x;
+              y_point += ref_y;
+
+              next_x_vals.push_back(x_point);
+              next_y_vals.push_back(y_point);
+          }
+          
           json msgJson;
-
-          vector<double> next_x_vals;
-          vector<double> next_y_vals;
-
-          /**
-           * TODO: define a path made up of (x,y) points that the car will visit
-           *   sequentially every .02 seconds
-           */
-
-
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
 
